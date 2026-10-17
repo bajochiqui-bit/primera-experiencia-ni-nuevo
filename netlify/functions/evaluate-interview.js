@@ -1,117 +1,137 @@
 
 exports.handler = async (event) => {
   const headers = {
-    "Content-Type": "application/json",
+    "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   };
+
+  const reply = (statusCode, data) => ({
+    statusCode,
+    headers,
+    body: JSON.stringify(data),
+  });
 
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers, body: "" };
   }
 
   if (event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      headers,
-      body: JSON.stringify({ error: "Método no permitido" }),
-    };
+    return reply(405, { error: "Método no permitido. Usa POST." });
   }
 
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({
-        error: "Falta configurar GEMINI_API_KEY en Netlify.",
-      }),
-    };
+    console.error("Falta la variable GEMINI_API_KEY.");
+    return reply(500, {
+      error: "Falta GEMINI_API_KEY en las variables de entorno de Netlify.",
+    });
   }
 
+  let input;
+
   try {
-    const { question, answer, level } = JSON.parse(event.body || "{}");
+    input = JSON.parse(event.body || "{}");
+  } catch {
+    return reply(400, { error: "El cuerpo de la solicitud no es JSON válido." });
+  }
 
-    if (
-      typeof question !== "string" ||
-      typeof answer !== "string" ||
-      answer.trim().split(/\s+/).filter(Boolean).length < 25
-    ) {
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({
-          error: "Envía una pregunta y una respuesta de al menos 25 palabras.",
-        }),
-      };
-    }
+  const { question, answer, level } = input;
 
-    const prompt = `
-Actúa como profesora experta en Negocios Internacionales,
-comercio exterior, logística y aduanas del Perú.
+  if (
+    typeof question !== "string" ||
+    typeof answer !== "string" ||
+    answer.trim().split(/\s+/).filter(Boolean).length < 25
+  ) {
+    return reply(400, {
+      error: "Escribe una pregunta y una respuesta de al menos 25 palabras.",
+    });
+  }
 
-Evalúa la respuesta de una estudiante en una entrevista simulada.
+  const prompt = `
+Eres profesora de Negocios Internacionales, comercio exterior,
+logística y aduanas del Perú. Evalúa esta respuesta de entrevista.
+
 Nivel: ${String(level || "intermedio")}
 Pregunta: ${question}
-Respuesta de la estudiante: ${answer}
+Respuesta: ${answer}
 
-Evalúa precisión, razonamiento, pasos propuestos, riesgos y comunicación.
-No inventes normas ni afirmes que se verificó una fuente si no fue así.
-Sé constructiva, concreta y adecuada para una estudiante.
-
-Devuelve SOLAMENTE un objeto JSON con esta estructura:
+Evalúa precisión, razonamiento, pasos, riesgos y comunicación.
+Sé constructiva y concreta. No inventes normas ni fuentes.
+Devuelve exclusivamente un JSON con esta estructura:
 {
-  "score": 0,
-  "summary": "Resumen de la evaluación",
-  "strengths": ["fortaleza 1", "fortaleza 2"],
-  "improvements": ["mejora 1", "mejora 2"],
+  "score": 75,
+  "summary": "Evaluación general",
+  "strengths": ["Fortaleza identificada"],
+  "improvements": ["Mejora concreta"],
   "sample_answer": "Ejemplo mejorado de respuesta"
 }
-La puntuación debe ser un número entre 0 y 100.
+score debe ser un número entre 0 y 100.
 `;
 
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
-        encodeURIComponent(apiKey),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: 0.3,
-            responseMimeType: "application/json",
-          },
-        }),
-      }
-    );
+  try {
+    const model = "gemini-2.5-flash";
+    const url =
+      "https://generativelanguage.googleapis.com/v1beta/models/" +
+      model +
+      ":generateContent";
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.3,
+          responseMimeType: "application/json",
+        },
+      }),
+    });
 
     const data = await response.json();
 
     if (!response.ok) {
       console.error("Gemini API error:", response.status, data);
-      return {
-        statusCode: response.status === 429 ? 429 : 502,
-        headers,
-        body: JSON.stringify({
-          error:
-            response.status === 429
-              ? "Gemini alcanzó su cuota o límite de solicitudes. Revisa el nivel gratuito del proyecto."
-              : "Gemini no pudo completar la evaluación. Revisa los registros de Netlify.",
-        }),
-      };
+
+      return reply(response.status === 429 ? 429 : 502, {
+        error: "Gemini no pudo evaluar la respuesta.",
+        status: response.status,
+        details:
+          data?.error?.message ||
+          "No se recibió información adicional del proveedor.",
+      });
     }
 
-    const text =
-      data.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text || "")
-        .join("") || "";
+    const text = (data.candidates?.[0]?.content?.parts || [])
+      .map((part) => part.text || "")
+      .join("");
 
-    const result = JSON.parse(text);
+    if (!text) {
+      console.error("Gemini no devolvió texto:", JSON.stringify(data));
+      return reply(502, {
+        error: "Gemini devolvió una respuesta vacía.",
+        details: "Revisa los registros de la función en Netlify.",
+      });
+    }
+
+    let result;
+
+    try {
+      result = JSON.parse(text);
+    } catch {
+      console.error("Respuesta JSON inválida de Gemini:", text);
+      return reply(502, {
+        error: "Gemini devolvió un formato de respuesta no válido.",
+      });
+    }
 
     const score = Number(result.score);
+
     if (
       !Number.isFinite(score) ||
       typeof result.summary !== "string" ||
@@ -119,29 +139,25 @@ La puntuación debe ser un número entre 0 y 100.
       !Array.isArray(result.improvements) ||
       typeof result.sample_answer !== "string"
     ) {
-      throw new Error("Gemini devolvió una respuesta con formato inesperado.");
+      console.error("Estructura inesperada de Gemini:", result);
+      return reply(502, {
+        error: "La evaluación de Gemini no tiene el formato esperado.",
+      });
     }
 
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify({
-        score: Math.max(0, Math.min(100, score)),
-        summary: result.summary,
-        strengths: result.strengths,
-        improvements: result.improvements,
-        sample_answer: result.sample_answer,
-      }),
-    };
+    return reply(200, {
+      score: Math.max(0, Math.min(100, score)),
+      summary: result.summary,
+      strengths: result.strengths,
+      improvements: result.improvements,
+      sample_answer: result.sample_answer,
+    });
   } catch (error) {
-    console.error("Error evaluando entrevista:", error);
+    console.error("Error en evaluate-interview:", error);
 
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({
-        error: "No se pudo completar la evaluación con Gemini.",
-      }),
-    };
+    return reply(500, {
+      error: "No se pudo completar la evaluación con Gemini.",
+      details: error.message || "Error interno de la función.",
+    });
   }
 };
