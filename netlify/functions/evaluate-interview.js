@@ -1,73 +1,147 @@
+
 exports.handler = async (event) => {
   const headers = {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
+    "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS"
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
   };
 
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers, body: "" };
   }
+
   if (event.httpMethod !== "POST") {
-    return { statusCode: 405, headers, body: JSON.stringify({ error: "Método no permitido" }) };
+    return {
+      statusCode: 405,
+      headers,
+      body: JSON.stringify({ error: "Método no permitido" }),
+    };
   }
-  if (!process.env.OPENAI_API_KEY) {
-    console.error("OPENAI_API_KEY is not available to this function runtime");
-    return { statusCode: 503, headers, body: JSON.stringify({ error: "AI_NOT_CONFIGURED" }) };
+
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        error: "Falta configurar GEMINI_API_KEY en Netlify.",
+      }),
+    };
   }
 
   try {
-    const body = JSON.parse(event.body || "{}");
-    const question = String(body.question || "").trim();
-    const answer = String(body.answer || "").trim();
-    const level = String(body.level || body.nivel || "basic").trim();
-    const words = answer.split(/\s+/).filter(Boolean);
-    if (!question || words.length < 25) {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: "INVALID_INPUT", message: "Incluye la pregunta y una respuesta de al menos 25 palabras." }) };
+    const { question, answer, level } = JSON.parse(event.body || "{}");
+
+    if (
+      typeof question !== "string" ||
+      typeof answer !== "string" ||
+      answer.trim().split(/\s+/).filter(Boolean).length < 25
+    ) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: "Envía una pregunta y una respuesta de al menos 25 palabras.",
+        }),
+      };
     }
 
-    const systemPrompt = `Eres una evaluadora de entrevistas para estudiantes de Negocios Internacionales que buscan su primera experiencia laboral en comercio exterior en Perú. Evalúa con rigor pero de forma constructiva. No inventes normas ni afirmes datos legales específicos. Devuelve únicamente JSON válido con esta estructura: {"score": número entero 0-100, "summary": texto breve en español, "strengths": arreglo de 2 a 4 fortalezas, "improvements": arreglo de 2 a 4 mejoras concretas, "sample_answer": una respuesta de ejemplo mejorada en español}. Valora claridad, pasos concretos, razonamiento, comunicación, consideración de riesgos y contexto profesional. Nivel: ${level}.`;
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-        temperature: 0.3,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: `Pregunta de entrevista: ${question}\n\nRespuesta de la persona: ${answer}` }
-        ]
-      })
-    });
-    const raw = await response.text();
+    const prompt = `
+Actúa como profesora experta en Negocios Internacionales,
+comercio exterior, logística y aduanas del Perú.
+
+Evalúa la respuesta de una estudiante en una entrevista simulada.
+Nivel: ${String(level || "intermedio")}
+Pregunta: ${question}
+Respuesta de la estudiante: ${answer}
+
+Evalúa precisión, razonamiento, pasos propuestos, riesgos y comunicación.
+No inventes normas ni afirmes que se verificó una fuente si no fue así.
+Sé constructiva, concreta y adecuada para una estudiante.
+
+Devuelve SOLAMENTE un objeto JSON con esta estructura:
+{
+  "score": 0,
+  "summary": "Resumen de la evaluación",
+  "strengths": ["fortaleza 1", "fortaleza 2"],
+  "improvements": ["mejora 1", "mejora 2"],
+  "sample_answer": "Ejemplo mejorado de respuesta"
+}
+La puntuación debe ser un número entre 0 y 100.
+`;
+
+    const response = await fetch(
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
+        encodeURIComponent(apiKey),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: {
+            temperature: 0.3,
+            responseMimeType: "application/json",
+          },
+        }),
+      }
+    );
+
+    const data = await response.json();
+
     if (!response.ok) {
-      console.error("OpenAI API error", response.status, raw.slice(0, 1200));
-      return { statusCode: 502, headers, body: JSON.stringify({ error: "OPENAI_REQUEST_FAILED", status: response.status, message: "La función llegó a OpenAI, pero la API rechazó la solicitud. Revisa los registros de la función." }) };
+      console.error("Gemini API error:", response.status, data);
+      return {
+        statusCode: response.status === 429 ? 429 : 502,
+        headers,
+        body: JSON.stringify({
+          error:
+            response.status === 429
+              ? "Gemini alcanzó su cuota o límite de solicitudes. Revisa el nivel gratuito del proyecto."
+              : "Gemini no pudo completar la evaluación. Revisa los registros de Netlify.",
+        }),
+      };
     }
-    const data = JSON.parse(raw);
-    const content = data.choices?.[0]?.message?.content;
-    if (!content) throw new Error("OpenAI returned no content");
-    const result = JSON.parse(content);
-    const score = Math.max(0, Math.min(100, Math.round(Number(result.score) || 0)));
+
+    const text =
+      data.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("") || "";
+
+    const result = JSON.parse(text);
+
+    const score = Number(result.score);
+    if (
+      !Number.isFinite(score) ||
+      typeof result.summary !== "string" ||
+      !Array.isArray(result.strengths) ||
+      !Array.isArray(result.improvements) ||
+      typeof result.sample_answer !== "string"
+    ) {
+      throw new Error("Gemini devolvió una respuesta con formato inesperado.");
+    }
+
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
-        score,
-        summary: String(result.summary || "Evaluación completada."),
-        strengths: Array.isArray(result.strengths) ? result.strengths.map(String).slice(0, 5) : [],
-        improvements: Array.isArray(result.improvements) ? result.improvements.map(String).slice(0, 5) : [],
-        sample_answer: String(result.sample_answer || "")
-      })
+        score: Math.max(0, Math.min(100, score)),
+        summary: result.summary,
+        strengths: result.strengths,
+        improvements: result.improvements,
+        sample_answer: result.sample_answer,
+      }),
     };
   } catch (error) {
-    console.error("evaluate-interview error", error?.stack || error);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "FUNCTION_ERROR", message: "La función encontró un error interno. Consulta los registros de Netlify." }) };
+    console.error("Error evaluando entrevista:", error);
+
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        error: "No se pudo completar la evaluación con Gemini.",
+      }),
+    };
   }
 };
