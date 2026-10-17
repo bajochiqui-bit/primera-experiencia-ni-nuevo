@@ -1,0 +1,8 @@
+PAQUETE CORREGIDO PARA PRIMERA EXPERIENCIA NI
+
+Contenido:
+- index.html: la versión más reciente de la web (plan de 7 días, recursos y simulador).
+- netlify.toml: configura la publicación y la carpeta de funciones.
+- netlify/functions/evaluate-interview.js: función de evaluación con OpenAI.
+
+IMPORTANTE: No publiques solo index.html mediante Netlify Drop esperando que procese la función. Para que la función funcione, sube estos archivos y carpetas a la raíz del repositorio GitHub vinculado a Netlify y espera el despliegue automático. Mantén OPENAI_API_KEY como variable de entorno en Netlify; nunca la escribas en HTML ni en GitHub.
